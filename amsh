@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+set -u
+
+CONFIG_FILE="${AMSH_CONF:-$(dirname "$0")/amsh.conf}"
+LOG_FILE="${AMSH_LOG:-$(dirname "$0")/../logs/amsh.log}"
+AUTO_ROOT_DEFAULT="$(dirname "$0")/../media/automount"
+AUTO_ROOT="${AUTO_ROOT:-$AUTO_ROOT_DEFAULT}"
+
+declare -A DEV
+declare -A TTL
+declare -A LAST
+
+log(){ echo "[$(date '+%F %T')] $*" >> "$LOG_FILE"; }
+info(){ echo "[INFO] $*"; log "INFO $*"; }
+warn(){ echo "[WARN] $*"; log "WARN $*"; }
+error(){ echo "[ERROR] $*"; log "ERROR $*"; }
+
+load_conf(){
+  DEV=()
+  TTL=()
+  if [ ! -f "$CONFIG_FILE" ]; then
+    error "missing config $CONFIG_FILE"
+    exit 1
+  fi
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    mp="$(echo "$line" | awk '{print $1}')"
+    dv="$(echo "$line" | awk '{print $2}')"
+    tt="$(echo "$line" | awk '{print $3}')"
+
+    if [ -z "$mp" ] || [ -z "$dv" ] || [ -z "$tt" ]; then
+      continue
+    fi
+
+    DEV["$mp"]="$dv"
+    TTL["$mp"]="$tt"
+  done < "$CONFIG_FILE"
+}
+
+mounted(){
+  findmnt -n "$1" >/dev/null 2>&1
+}
+
+busy(){
+  sudo fuser -m "$1" >/dev/null 2>&1
+}
+
+do_mount(){
+  mp="$1"
+  dv="${DEV[$mp]:-}"
+  [ -z "$dv" ] && return 1
+
+  if mounted "$mp"; then
+    LAST["$mp"]="$(date +%s)"
+    return 0
+  fi
+
+  mkdir -p "$mp" || return 1
+  info "mount $dv -> $mp"
+  if sudo mount "$dv" "$mp"; then
+    LAST["$mp"]="$(date +%s)"
+    return 0
+  fi
+  error "mount failed"
+  return 1
+}
+
+do_umount(){
+  mp="$1"
+  mounted "$mp" || return 1
+
+  case "$mp" in
+    "$AUTO_ROOT"/*) ;;
+    *) return 1 ;;
+  esac
+
+  if busy "$mp"; then
+    warn "busy, skip umount $mp"
+    return 2
+  fi
+
+  info "umount $mp"
+  if sudo umount "$mp"; then
+    rmdir "$mp" 2>/dev/null || true
+    unset LAST["$mp"] 2>/dev/null || true
+    return 0
+  fi
+  warn "umount failed"
+  return 1
+}
+
+touch_used(){
+  LAST["$1"]="$(date +%s)"
+}
+
+mounts_for_path(){
+  p="$1"
+  arr=()
+  for mp in "${!DEV[@]}"; do
+    case "$p" in
+      "$mp"|"$mp"/*) arr+=("$mp") ;;
+    esac
+  done
+  if [ "${#arr[@]}" -gt 0 ]; then
+    printf "%s\n" "${arr[@]}" | awk '{print length($0), $0}' | sort -rn | awk '{$1=""; sub(/^ /,""); print}'
+  fi
+}
+
+cmd_cd(){
+  t="${1:-$HOME}"
+
+  if [[ "$t" == "~" ]]; then t="$HOME"; fi
+  if [[ "$t" == ~/* ]]; then t="$HOME/${t#~/}"; fi
+  if [[ "$t" != /* ]]; then t="$PWD/$t"; fi
+
+  real="$(cd "$PWD" 2>/dev/null && cd "$t" 2>/dev/null && pwd -P)" || { error "cd: no such dir"; return 1; }
+
+  need="$(mounts_for_path "$real" || true)"
+  if [ -n "$need" ]; then
+    while IFS= read -r mp; do
+      [ -z "$mp" ] && continue
+      if ! mounted "$mp"; then
+        do_mount "$mp" || return 1
+      fi
+      touch_used "$mp"
+    done <<< "$need"
+  fi
+
+  cd "$real" || return 1
+}
+
+cmd_status(){
+  findmnt -rn | awk -v root="$AUTO_ROOT" '$2 ~ "^" root'
+}
+
+cmd_devices(){
+  lsblk -pnro NAME,TYPE,TRAN,FSTYPE,LABEL,UUID,MOUNTPOINT
+}
+
+cleaner(){
+  while true; do
+    now="$(date +%s)"
+    for mp in "${!TTL[@]}"; do
+      if mounted "$mp"; then
+        last="${LAST[$mp]:-0}"
+        ttl="${TTL[$mp]:-0}"
+        if [ "$last" -eq 0 ]; then
+          LAST["$mp"]="$now"
+          continue
+        fi
+        diff=$((now - last))
+        if [ "$ttl" -gt 0 ] && [ "$diff" -ge "$ttl" ]; then
+          do_umount "$mp" >/dev/null 2>&1 || true
+        fi
+      fi
+    done
+    sleep 5
+  done
+}
+
+helpme(){
+  echo "help"
+  echo "cd <path>"
+  echo "status"
+  echo "devices"
+  echo "umount <mountpoint>"
+  echo "reload"
+  echo "exit"
+}
+
+main(){
+  mkdir -p "$(dirname "$LOG_FILE")"
+  mkdir -p "$AUTO_ROOT"
+  load_conf
+
+  cleaner & CPID=$!
+  trap 'kill "$CPID" >/dev/null 2>&1 || true' EXIT
+
+  helpme
+
+  while true; do
+    echo -n "amsh:$PWD> "
+    IFS= read -r line || break
+    [ -z "$line" ] && continue
+
+    cmd="$(echo "$line" | awk '{print $1}')"
+    arg="$(echo "$line" | cut -d' ' -f2- | sed 's/^[[:space:]]*//')"
+
+    case "$cmd" in
+      exit) break ;;
+      help) helpme ;;
+      cd) cmd_cd "$arg" ;;
+      status) cmd_status ;;
+      devices) cmd_devices ;;
+      umount) [ -z "$arg" ] && echo "umount <mountpoint>" || do_umount "$arg" ;;
+      reload) load_conf ;;
+      *) bash -lc "$line" ;;
+    esac
+  done
+}
+
+main
