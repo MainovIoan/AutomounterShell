@@ -1,5 +1,4 @@
-AutomounterShell
-Shell custom care monteaza automat mountpoint-uri la accesarea prin comanda cd.
+AutomounterShell monteaza automat mountpoint-uri la accesarea prin comanda cd.
 Functionalitati:
 - shell propriu cu prompt
 - executie comenzi externe
@@ -9,7 +8,6 @@ Functionalitati:
 - demontare automata daca mountpoint-ul nu este utilizat
 
 Rulare
-```bash
 chmod +x amsh
 ./amsh
 
