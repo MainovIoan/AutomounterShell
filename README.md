@@ -8,8 +8,8 @@ Functionalitati:
 - demontare automata daca mountpoint-ul nu este utilizat
 
 Rulare
-chmod +x amsh
-./amsh
+
+sudo ./src/amsh
 
 Configurare
 Mountpoint-urile sunt definite in fisierul amsh.conf.
