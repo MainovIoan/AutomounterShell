@@ -1,6 +1,6 @@
 AutomounterShell monteaza automat mountpoint-uri la accesarea prin comanda cd.
 Functionalitati:
-- shell propriu cu prompt
+- shell propriu 
 - executie comenzi externe
 - comanda cd implementata intern
 - automount pe baza unui fisier de configurare
